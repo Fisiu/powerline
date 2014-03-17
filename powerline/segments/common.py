@@ -5,6 +5,7 @@ from __future__ import unicode_literals, absolute_import, division
 import os
 import sys
 import re
+import subprocess
 
 from datetime import datetime
 import socket
@@ -828,6 +829,15 @@ Highlight groups used: ``network_load_sent_gradient`` (gradient) or ``network_lo
 def virtualenv(pl, segment_info):
 	'''Return the name of the current Python virtualenv.'''
 	return os.path.basename(segment_info['environ'].get('VIRTUAL_ENV', '')) or None
+
+
+@requires_segment_info
+def rvm(pl, segment_info):
+	'''Return the name of the current ruby version set with rvm.'''
+	version = subprocess.check_output("rvm-prompt").rstrip()
+	if version == ""
+		version = None
+	return version
 
 
 _IMAPKey = namedtuple('Key', 'username password server port folder')
