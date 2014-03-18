@@ -835,7 +835,7 @@ def virtualenv(pl, segment_info):
 def rvm(pl, segment_info):
 	'''Return the name of the current ruby version set with rvm.'''
 	version = subprocess.check_output("rvm-prompt").rstrip()
-	if version == ""
+	if version == "":
 		version = None
 	return version
 
