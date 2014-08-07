@@ -2,6 +2,7 @@
 
 from __future__ import absolute_import
 
+import sys
 from powerline.bindings.vim import vim_get_func, vim_getvar
 from powerline import Powerline
 from powerline.lib import mergedicts
@@ -23,8 +24,8 @@ def _override_from(config, override_varname):
 
 
 class VimPowerline(Powerline):
-	def __init__(self, pyeval='PowerlinePyeval'):
-		super(VimPowerline, self).__init__('vim')
+	def __init__(self, pyeval='PowerlinePyeval', **kwargs):
+		super(VimPowerline, self).__init__('vim', **kwargs)
 		self.last_window_id = 1
 		self.window_statusline = '%!' + pyeval + '(\'powerline.statusline({0})\')'
 
@@ -71,7 +72,8 @@ class VimPowerline(Powerline):
 			return {}
 
 		self.get_matcher = gen_matcher_getter(self.ext, self.import_paths)
-		return dict(((self.get_matcher(key), {'config': self.load_theme_config(val)})
+		return dict(((None if key == '__tabline__' else self.get_matcher(key),
+						{'config': self.load_theme_config(val)})
 					for key, val in local_themes.items()))
 
 	def get_config_paths(self):
@@ -140,6 +142,9 @@ class VimPowerline(Powerline):
 			return 'No window {0}'.format(window_id)
 		return self.render(window, window_id, winnr)
 
+	def tabline(self):
+		return self.render()
+
 	def new_window(self):
 		window, window_id, winnr = self.win_idx(None)
 		return self.render(window, window_id, winnr)
@@ -155,16 +160,30 @@ class VimPowerline(Powerline):
 													__main__.__dict__)))
 
 
-def setup(pyeval=None, pycmd=None):
-	import sys
+pycmd = None
+
+
+def set_pycmd(new_pycmd):
+	global pycmd
+	pycmd = new_pycmd
+
+
+def get_default_pycmd():
+	return 'python' if sys.version_info < (3,) else 'python3'
+
+
+def setup(pyeval=None, pycmd=None, can_replace_pyeval=True):
 	import __main__
 	if not pyeval:
 		pyeval = 'pyeval' if sys.version_info < (3,) else 'py3eval'
+		can_replace_pyeval = True
 	if not pycmd:
-		pycmd = 'python' if sys.version_info < (3,) else 'python3'
+		pycmd = get_default_pycmd()
+
+	set_pycmd(pycmd)
 
 	# pyeval() and vim.bindeval were both introduced in one patch
-	if not hasattr(vim, 'bindeval'):
+	if not hasattr(vim, 'bindeval') and can_replace_pyeval:
 		vim.command(('''
 				function! PowerlinePyeval(e)
 					{pycmd} powerline.pyeval()
@@ -187,3 +206,4 @@ def setup(pyeval=None, pycmd=None):
 	# Is immediately changed after new_window function is run. Good for global 
 	# value.
 	vim.command('set statusline=%!{pyeval}(\'powerline.new_window()\')'.format(pyeval=pyeval))
+	vim.command('set tabline=%!{pyeval}(\'powerline.tabline()\')'.format(pyeval=pyeval))

@@ -1,23 +1,57 @@
 # vim:fileencoding=utf-8:noet
+from __future__ import absolute_import, unicode_literals, division, print_function
 
-from __future__ import absolute_import
 import sys
 
+from powerline.lib.file_watcher import create_file_watcher
 
-def get_segment_key(segment, theme_configs, key, module=None, default=None):
+
+def list_segment_key_values(segment, theme_configs, key, module=None, default=None):
 	try:
-		return segment[key]
+		yield segment[key]
 	except KeyError:
-		if 'name' in segment:
-			name = segment['name']
-			for theme_config in theme_configs:
-				if 'segment_data' in theme_config:
-					for segment_key in ((module + '.' + name, name) if module else (name,)):
-						try:
-							return theme_config['segment_data'][segment_key][key]
-						except KeyError:
-							pass
-	return default
+		pass
+	try:
+		name = segment['name']
+	except KeyError:
+		pass
+	else:
+		found_module_key = False
+		for theme_config in theme_configs:
+			try:
+				segment_data = theme_config['segment_data']
+			except KeyError:
+				pass
+			else:
+				if module:
+					try:
+						yield segment_data[module + '.' + name][key]
+						found_module_key = True
+					except KeyError:
+						pass
+				if not found_module_key:
+					try:
+						yield segment_data[name][key]
+					except KeyError:
+						pass
+	yield default
+
+
+def get_segment_key(merge, *args, **kwargs):
+	if merge:
+		ret = None
+		for value in list_segment_key_values(*args, **kwargs):
+			if ret is None:
+				ret = value
+			elif isinstance(ret, dict) and isinstance(value, dict):
+				old_ret = ret
+				ret = value.copy()
+				ret.update(old_ret)
+			else:
+				return ret
+		return ret
+	else:
+		return next(list_segment_key_values(*args, **kwargs))
 
 
 def get_function(data, segment):
@@ -31,7 +65,7 @@ def get_function(data, segment):
 
 
 def get_string(data, segment):
-	return data['get_key'](segment, None, 'contents'), None, None
+	return data['get_key'](False, segment, None, 'contents'), None, None
 
 
 def get_filler(data, segment):
@@ -42,17 +76,93 @@ segment_getters = {
 	"function": get_function,
 	"string": get_string,
 	"filler": get_filler,
+	"segment_list": get_function,
 }
 
 
-def gen_segment_getter(pl, ext, path, theme_configs, default_module=None):
+def get_attr_func(contents_func, key, args):
+	try:
+		func = getattr(contents_func, key)
+	except AttributeError:
+		return None
+	else:
+		if args is None:
+			return lambda: func()
+		else:
+			return lambda pl, shutdown_event: func(pl=pl, shutdown_event=shutdown_event, **args)
+
+
+def process_segment_lister(pl, segment_info, parsed_segments, side, lister, subsegments, patcher_args):
+	for subsegment_info, subsegment_update in lister(pl=pl, segment_info=segment_info, **patcher_args):
+		for subsegment in subsegments:
+			if subsegment_update:
+				subsegment = subsegment.copy()
+				subsegment.update(subsegment_update)
+				if subsegment_update['priority_multiplier'] and subsegment['priority']:
+					subsegment['priority'] *= subsegment_update['priority_multiplier']
+			process_segment(pl, side, subsegment_info, parsed_segments, subsegment)
+	return None
+
+
+def process_segment(pl, side, segment_info, parsed_segments, segment):
+	if segment['type'] in ('function', 'segment_list'):
+		pl.prefix = segment['name']
+		try:
+			if segment['type'] == 'function':
+				contents = segment['contents_func'](pl, segment_info)
+			else:
+				contents = segment['contents_func'](pl, segment_info, parsed_segments, side)
+		except Exception as e:
+			pl.exception('Exception while computing segment: {0}', str(e))
+			return
+
+		if contents is None:
+			return
+		if isinstance(contents, list):
+			segment_base = segment.copy()
+			if contents:
+				draw_divider_position = -1 if side == 'left' else 0
+				for key, i, newval in (
+					('before', 0, ''),
+					('after', -1, ''),
+					('draw_soft_divider', draw_divider_position, True),
+					('draw_hard_divider', draw_divider_position, True),
+				):
+					try:
+						contents[i][key] = segment_base.pop(key)
+						segment_base[key] = newval
+					except KeyError:
+						pass
+
+			draw_inner_divider = None
+			if side == 'right':
+				append = parsed_segments.append
+			else:
+				pslen = len(parsed_segments)
+				append = lambda item: parsed_segments.insert(pslen, item)
+
+			for subsegment in (contents if side == 'right' else reversed(contents)):
+				segment_copy = segment_base.copy()
+				segment_copy.update(subsegment)
+				if draw_inner_divider is not None:
+					segment_copy['draw_soft_divider'] = draw_inner_divider
+				draw_inner_divider = segment_copy.pop('draw_inner_divider', None)
+				append(segment_copy)
+		else:
+			segment['contents'] = contents
+			parsed_segments.append(segment)
+	elif segment['width'] == 'auto' or (segment['type'] == 'string' and segment['contents'] is not None):
+		parsed_segments.append(segment)
+
+
+def gen_segment_getter(pl, ext, common_config, theme_configs, default_module=None):
 	data = {
 		'default_module': default_module or 'powerline.segments.' + ext,
-		'path': path,
+		'path': common_config['paths'],
 	}
 
-	def get_key(segment, module, key, default=None):
-		return get_segment_key(segment, theme_configs, key, module, default)
+	def get_key(merge, segment, module, key, default=None):
+		return get_segment_key(merge, segment, theme_configs, key, module, default)
 	data['get_key'] = get_key
 
 	def get(segment, side):
@@ -68,19 +178,64 @@ def gen_segment_getter(pl, ext, path, theme_configs, default_module=None):
 			pl.exception('Failed to generate segment from {0!r}: {1}', segment, str(e), prefix='segment_generator')
 			return None
 
+		if not get_key(False, segment, module, 'display', True):
+			return None
+
 		if segment_type == 'function':
 			highlight_group = [module + '.' + segment['name'], segment['name']]
 		else:
 			highlight_group = segment.get('highlight_group') or segment.get('name')
 
+		if segment_type in ('function', 'segment_list'):
+			args = dict(((str(k), v) for k, v in get_key(True, segment, module, 'args', {}).items()))
+
+		if segment_type == 'segment_list':
+			# Handle startup and shutdown of _contents_func?
+			subsegments = [
+				get(subsegment, side)
+				for subsegment in segment['segments']
+			]
+			return {
+				'name': segment.get('name'),
+				'type': segment_type,
+				'highlight_group': None,
+				'divider_highlight_group': None,
+				'before': None,
+				'after': None,
+				'contents_func': lambda pl, segment_info, parsed_segments, side: process_segment_lister(
+					pl, segment_info, parsed_segments, side,
+					patcher_args=args,
+					subsegments=subsegments,
+					lister=_contents_func,
+				),
+				'contents': None,
+				'priority': None,
+				'draw_soft_divider': None,
+				'draw_hard_divider': None,
+				'draw_inner_divider': None,
+				'side': side,
+				'exclude_modes': segment.get('exclude_modes', []),
+				'include_modes': segment.get('include_modes', []),
+				'width': None,
+				'align': None,
+				'startup': None,
+				'shutdown': None,
+				'mode': None,
+				'_rendered_raw': '',
+				'_rendered_hl': '',
+				'_len': None,
+				'_contents_len': None,
+				'_space_left': 0,
+				'_space_right': 0,
+			}
+
 		if segment_type == 'function':
-			args = dict(((str(k), v) for k, v in get_key(segment, module, 'args', {}).items()))
-			try:
-				_startup_func = _contents_func.startup
-			except AttributeError:
-				startup_func = None
-			else:
-				startup_func = lambda pl, shutdown_event: _startup_func(pl=pl, shutdown_event=shutdown_event, **args)
+			startup_func = get_attr_func(_contents_func, 'startup', args)
+			shutdown_func = get_attr_func(_contents_func, 'shutdown', None)
+
+			if hasattr(_contents_func, 'powerline_requires_filesystem_watcher'):
+				create_watcher = lambda: create_file_watcher(pl, common_config['watcher'])
+				args[str('create_watcher')] = create_watcher
 
 			if hasattr(_contents_func, 'powerline_requires_segment_info'):
 				contents_func = lambda pl, segment_info: _contents_func(pl=pl, segment_info=segment_info, **args)
@@ -88,6 +243,7 @@ def gen_segment_getter(pl, ext, path, theme_configs, default_module=None):
 				contents_func = lambda pl, segment_info: _contents_func(pl=pl, **args)
 		else:
 			startup_func = None
+			shutdown_func = None
 			contents_func = None
 
 		return {
@@ -95,11 +251,10 @@ def gen_segment_getter(pl, ext, path, theme_configs, default_module=None):
 			'type': segment_type,
 			'highlight_group': highlight_group,
 			'divider_highlight_group': None,
-			'before': get_key(segment, module, 'before', ''),
-			'after': get_key(segment, module, 'after', ''),
+			'before': get_key(False, segment, module, 'before', ''),
+			'after': get_key(False, segment, module, 'after', ''),
 			'contents_func': contents_func,
 			'contents': contents,
-			'args': args if segment_type == 'function' else {},
 			'priority': segment.get('priority', None),
 			'draw_hard_divider': segment.get('draw_hard_divider', True),
 			'draw_soft_divider': segment.get('draw_soft_divider', True),
@@ -109,11 +264,13 @@ def gen_segment_getter(pl, ext, path, theme_configs, default_module=None):
 			'include_modes': segment.get('include_modes', []),
 			'width': segment.get('width'),
 			'align': segment.get('align', 'l'),
-			'shutdown': getattr(contents_func, 'shutdown', None),
 			'startup': startup_func,
+			'shutdown': shutdown_func,
+			'mode': None,
 			'_rendered_raw': '',
 			'_rendered_hl': '',
-			'_len': 0,
+			'_len': None,
+			'_contents_len': None,
 			'_space_left': 0,
 			'_space_right': 0,
 		}

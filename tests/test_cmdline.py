@@ -71,6 +71,7 @@ class TestParser(TestCase):
 					'-c', 'common.spaces=4',
 					'-t', 'default.segment_data.hostname.before=H:',
 					'-p', '.',
+					'-p', '..',
 					'-R', 'smth={"abc":"def"}',
 				], {
 					'ext': ['shell'],
@@ -90,10 +91,12 @@ class TestParser(TestCase):
 							}
 						}
 					},
-					'config_path': '.',
+					'config_path': ['.', '..'],
 					'renderer_arg': {'smth': {'abc': 'def'}},
 				}),
 				(['shell', '-R', 'arg=true'], {'ext': ['shell'], 'renderer_arg': {'arg': True}}),
+				(['shell', '-R', 'arg=true', '-R', 'arg='], {'ext': ['shell'], 'renderer_arg': {}}),
+				(['shell', '-R', 'arg='], {'ext': ['shell'], 'renderer_arg': {}}),
 				(['shell', '-t', 'default.segment_info={"hostname": {}}'], {
 					'ext': ['shell'],
 					'theme_option': {

@@ -1,12 +1,16 @@
-if test -z "${POWERLINE_COMMAND}" ; then
-	if which powerline-client &>/dev/null ; then
-		export POWERLINE_COMMAND=powerline-client
-	elif which powerline &>/dev/null ; then
-		export POWERLINE_COMMAND=powerline
-	else
-		export POWERLINE_COMMAND="$0:A:h:h:h:h/scripts/powerline"
+_POWERLINE_SOURCED="$0:A"
+
+_powerline_columns_fallback() {
+	if which stty &>/dev/null ; then
+		local cols="$(stty size 2>/dev/null)"
+		if ! test -z "$cols" ; then
+			echo "${cols#* }"
+			return 0
+		fi
 	fi
-fi
+	echo 0
+	return 0
+}
 
 integer _POWERLINE_JOBNUM
 
@@ -28,7 +32,7 @@ _powerline_init_tmux_support() {
 		}
 
 		function -g _powerline_tmux_set_columns() {
-			_powerline_tmux_setenv COLUMNS "$COLUMNS"
+			_powerline_tmux_setenv COLUMNS "${COLUMNS:-$(_powerline_columns_fallback)}"
 		}
 
 		chpwd_functions+=( _powerline_tmux_set_pwd )
@@ -99,28 +103,52 @@ _powerline_set_jobnum() {
 	_POWERLINE_JOBNUM=${(%):-%j}
 }
 
+_powerline_update_counter() {
+	zpython '_powerline.precmd()'
+}
+
 _powerline_setup_prompt() {
 	emulate -L zsh
+
 	for f in "${precmd_functions[@]}"; do
 		if [[ "$f" = "_powerline_set_jobnum" ]]; then
 			return
 		fi
 	done
 	precmd_functions+=( _powerline_set_jobnum )
-	if zmodload zsh/zpython &>/dev/null ; then
+
+	VIRTUAL_ENV_DISABLE_PROMPT=1
+
+	if test -z "${POWERLINE_NO_ZSH_ZPYTHON}" && { zmodload libzpython || zmodload zsh/zpython } &>/dev/null ; then
+		precmd_functions+=( _powerline_update_counter )
 		zpython 'from powerline.bindings.zsh import setup as _powerline_setup'
-		zpython '_powerline_setup()'
+		zpython '_powerline = _powerline_setup()'
 		zpython 'del _powerline_setup'
 	else
-		local add_args='--last_exit_code=$? --last_pipe_status="$pipestatus"'
+		if test -z "${POWERLINE_COMMAND}" ; then
+			if which powerline-config &>/dev/null ; then
+				export POWERLINE_COMMAND="$(powerline-config shell command)"
+			else
+				local powerline_dir="$POWERLINE_SOURCED:h:h:h:h"
+				export POWERLINE_COMMAND="$($powerline_dir/scripts/powerline-config shell command)"
+			fi
+		fi
+
+		local add_args='--last_exit_code=$?'
+		add_args+=' --last_pipe_status="$pipestatus"'
 		add_args+=' --renderer_arg="client_id=$$"'
 		add_args+=' --jobnum=$_POWERLINE_JOBNUM'
-		local add_args_2=$add_args' -R parser_state=${(%%):-%_} -R local_theme=continuation'
-		PS1='$($POWERLINE_COMMAND shell left -r zsh_prompt '$add_args')'
+		local new_args_2=' -R parser_state=${(%%):-%_}'
+		new_args_2+=' -R local_theme=continuation'
+		local add_args_3=$add_args' -R local_theme=select'
+		local add_args_2=$add_args$new_args_2
+		add_args+=' --width=$(( ${COLUMNS:-$(_powerline_columns_fallback)} - 1 ))'
+		local add_args_r2=$add_args$new_args_2
+		PS1='$($POWERLINE_COMMAND shell aboveleft -r zsh_prompt '$add_args')'
 		RPS1='$($POWERLINE_COMMAND shell right -r zsh_prompt '$add_args')'
 		PS2='$($POWERLINE_COMMAND shell left -r zsh_prompt '$add_args_2')'
-		RPS2='$($POWERLINE_COMMAND shell right -r zsh_prompt '$add_args_2')'
-		PS3='$($POWERLINE_COMMAND shell left -r zsh_prompt -R local_theme=select '$add_args')'
+		RPS2='$($POWERLINE_COMMAND shell right -r zsh_prompt '$add_args_r2')'
+		PS3='$($POWERLINE_COMMAND shell left -r zsh_prompt '$add_args_3')'
 	fi
 }
 
@@ -150,6 +178,10 @@ _powerline_add_widget() {
 
 setopt promptpercent
 setopt promptsubst
-_powerline_setup_prompt
-_powerline_init_tmux_support
-_powerline_init_modes_support
+if test -z "$POWERLINE_NO_ZSH_PROMPT$POWERLINE_NO_SHELL_PROMPT" ; then
+	_powerline_setup_prompt
+	_powerline_init_modes_support
+fi
+if test -z "$POWERLINE_NO_ZSH_TMUX_SUPPORT$POWERLINE_NO_SHELL_TMUX_SUPPORT" ; then
+	_powerline_init_tmux_support
+fi

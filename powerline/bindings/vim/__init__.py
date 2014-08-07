@@ -41,20 +41,28 @@ else:
 	vim_get_func = VimFunc
 
 
-# It may crash on some old vim versions and I do not remember in which patch 
-# I fixed this crash.
-if hasattr(vim, 'vvars') and vim.vvars['version'] > 703:
+if hasattr(vim, 'bindeval'):
 	_vim_to_python_types = {
-		vim.Dictionary: lambda value: dict(((key, _vim_to_python(value[key])) for key in value.keys())),
-		vim.List: lambda value: [_vim_to_python(item) for item in value],
-		vim.Function: lambda _: None,
+		getattr(vim, 'Dictionary', None) or type(vim.bindeval('{}')):
+			lambda value: dict(((key, _vim_to_python(value[key])) for key in value.keys())),
+		getattr(vim, 'List', None) or type(vim.bindeval('[]')):
+			lambda value: [_vim_to_python(item) for item in value],
+		getattr(vim, 'Function', None) or type(vim.bindeval('function("mode")')):
+			lambda _: None,
 	}
+
+	if sys.version_info >= (3,):
+		_vim_to_python_types[bytes] = lambda value: value.decode('utf-8')
 
 	_id = lambda value: value
 
 	def _vim_to_python(value):
 		return _vim_to_python_types.get(type(value), _id)(value)
 
+
+# It may crash on some old vim versions and I do not remember in which patch 
+# I fixed this crash.
+if hasattr(vim, 'vvars') and vim.vvars['version'] > 703:
 	def vim_getvar(varname):
 		return _vim_to_python(vim.vars[str(varname)])
 
@@ -76,10 +84,10 @@ else:
 
 	def bufvar_exists(buffer, varname):  # NOQA
 		if not buffer or buffer.number == vim.current.buffer.number:
-			return vim.eval('exists("b:{0}")'.format(varname))
+			return int(vim.eval('exists("b:{0}")'.format(varname)))
 		else:
-			return vim.eval('has_key(getbufvar({0}, ""), {1})'
-							.format(buffer.number, varname))
+			return int(vim.eval('has_key(getbufvar({0}, ""), {1})'
+							.format(buffer.number, varname)))
 
 	def vim_getwinvar(segment_info, varname):  # NOQA
 		result = vim.eval('getwinvar({0}, "{1}")'.format(segment_info['winnr'], varname))
@@ -96,16 +104,86 @@ else:
 		return getbufvar(info['bufnr'], '&' + option)
 
 
+if hasattr(vim, 'tabpages'):
+	current_tabpage = lambda: vim.current.tabpage
+	list_tabpages = lambda: vim.tabpages
+else:
+	class FalseObject(object):
+		@staticmethod
+		def __nonzero__():
+			return False
+
+		__bool__ = __nonzero__
+
+	def get_buffer(number):
+		for buffer in vim.buffers:
+			if buffer.number == number:
+				return buffer
+		raise KeyError(number)
+
+	class WindowVars(object):
+		__slots__ = ('tabnr', 'winnr')
+
+		def __init__(self, window):
+			self.tabnr = window.tabnr
+			self.winnr = window.number
+
+		def __getitem__(self, key):
+			has_key = vim.eval('has_key(gettabwinvar({0}, {1}, ""), "{2}")'.format(self.tabnr, self.winnr, key))
+			if has_key == '0':
+				raise KeyError
+			return vim.eval('gettabwinvar({0}, {1}, "{2}")'.format(self.tabnr, self.winnr, key))
+
+		def get(self, key, default=None):
+			try:
+				return self[key]
+			except KeyError:
+				return default
+
+	class Window(FalseObject):
+		__slots__ = ('tabnr', 'number', '_vars')
+
+		def __init__(self, tabnr, number):
+			self.tabnr = tabnr
+			self.number = number
+			self.vars = WindowVars(self)
+
+		@property
+		def buffer(self):
+			return get_buffer(int(vim.eval('tabpagebuflist({0})[{1}]'.format(self.tabnr, self.number - 1))))
+
+	class Tabpage(FalseObject):
+		__slots__ = ('number',)
+
+		def __init__(self, number):
+			self.number = number
+
+		def __eq__(self, tabpage):
+			if not isinstance(tabpage, Tabpage):
+				raise NotImplementedError
+			return self.number == tabpage.number
+
+		@property
+		def window(self):
+			return Window(self.number, int(vim.eval('tabpagewinnr({0})'.format(self.number))))
+
+	def _last_tab_nr():
+		return int(vim.eval('tabpagenr("$")'))
+
+	def current_tabpage():  # NOQA
+		return Tabpage(int(vim.eval('tabpagenr()')))
+
+	def list_tabpages():  # NOQA
+		return [Tabpage(nr) for nr in range(1, _last_tab_nr() + 1)]
+
+
 if sys.version_info < (3,) or not hasattr(vim, 'bindeval'):
 	getbufvar = vim_get_func('getbufvar')
 else:
 	_getbufvar = vim_get_func('getbufvar')
 
 	def getbufvar(*args):
-		r = _getbufvar(*args)
-		if type(r) is bytes:
-			return r.decode('utf-8')
-		return r
+		return _vim_to_python(_getbufvar(*args))
 
 
 class VimEnviron(object):
@@ -152,6 +230,33 @@ def powerline_vim_strtrans_error(e):
 
 
 codecs.register_error('powerline_vim_strtrans_error', powerline_vim_strtrans_error)
+
+
+did_autocmd = False
+buffer_caches = []
+
+
+def register_buffer_cache(cachedict):
+	global did_autocmd
+	global buffer_caches
+	from powerline.vim import get_default_pycmd, pycmd
+	if not did_autocmd:
+		import __main__
+		__main__.powerline_on_bwipe = on_bwipe
+		vim.command('augroup Powerline')
+		vim.command('	autocmd! BufWipeout * :{pycmd} powerline_on_bwipe()'.format(
+			pycmd=(pycmd or get_default_pycmd())))
+		vim.command('augroup END')
+		did_autocmd = True
+	buffer_caches.append(cachedict)
+	return cachedict
+
+
+def on_bwipe():
+	global buffer_caches
+	bufnr = int(vim.eval('expand("<abuf>")'))
+	for cachedict in buffer_caches:
+		cachedict.pop(bufnr, None)
 
 
 environ = VimEnviron()
